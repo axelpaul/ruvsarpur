@@ -905,7 +905,7 @@ RE_CAPTURE_VOD_EPNUM_FROM_TITLE = re.compile(r'(?P<ep_num>\d+) af (?P<ep_total>\
 #
 # Downloads the full front page VOD schedule and for each episode in there fetches all available episodes
 # uses the new RUV GraphQL queries
-def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache=None, imdb_orignal_titles=None):
+def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache=None, imdb_orignal_titles=None, imdb_episode_data=None):
 
   # Start with getting all the series available on RUV through their API, this gives us basic information about each of the series
   # https://api.ruv.is/api/programs/tv/all
@@ -974,7 +974,7 @@ def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache
     # Add all details for the given program to the schedule
     try:
       # We want to not override existing items in the schedule dictionary in case they are downloaded again
-      program_schedule = getVodSeriesSchedule(program['id'], program, imdb_cache, imdb_orignal_titles)
+      program_schedule = getVodSeriesSchedule(program['id'], program, imdb_cache, imdb_orignal_titles, imdb_episode_data)
       # This joining of the two dictionaries below is necessary to ensure that 
       # the existing items are not overwritten, therefore schedule is appended to the new list, existing items overwriting any new items.
       #schedule = dict(list(program_schedule.items()) + list(schedule.items())) 
@@ -1025,7 +1025,7 @@ def formatCoverArtResolutionMacro(rawsrc):
 
 #
 # Given a series id and program data, downloads all episodes available for that series
-def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
+def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_data=None):
   schedule = {}  
 
   # Perform two lookups, first to the API as this gives us a more complete information about the series, but unfortunately no episode data
@@ -1183,20 +1183,58 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
     entry['multiple_episodes'] = prog['multiple_episodes']
     entry['web_available_episodes'] = prog['web_available_episodes']
 
-    # FIX: The RÚV API's 'number' field is unreliable and can contain duplicate values
-    # (e.g., multiple episodes labeled as episode 11). For TV shows, we sort episodes
-    # by their firstrun date and use the chronological position as the episode number.
+    # FIX: The RÚV API's 'number' field is unreliable and can contain duplicate values.
+    # Solution: Use IMDB episode data when available, otherwise fall back to chronological position.
     #
-    # IMPORTANT ASSUMPTION: This fix assumes that the RÚV API returns ALL episodes from
-    # a season (not just a subset of available episodes). If only some episodes are
-    # available, the position-based numbering may not match the actual broadcast episode
-    # numbers. In such cases, IMDB episode data integration would be needed for accuracy.
+    # For TV shows:
+    # 1. If IMDB episode data is available, match RÚV episode to IMDB episode by title
+    # 2. Use the IMDB episode number when matched
+    # 3. Otherwise, fall back to chronological position (after sorting by firstrun date)
     #
-    # For movies, documentaries, and sports, preserve the original behavior.
+    # For movies, documentaries, and sports: Use the original logic.
+
+    imdb_ep_num = None
     if not isMovie and not isDocumentary and not isSport:
-      # For TV shows: Use chronological position (after sorting by firstrun date)
-      # This ensures episodes are numbered correctly even if the API's 'number' field is wrong
-      entry['ep_num'] = str(episode_index + 1)
+      # Try to match with IMDB episode data if available
+      if imdb_episode_data and imdb_result and 'id' in imdb_result:
+        series_imdb_id = imdb_result['id']
+
+        # Check if we have episode data for this series
+        if series_imdb_id in imdb_episode_data:
+          # Try to match by episode title using fuzzy matching
+          ruv_episode_title = entry['episode_title'].lower() if entry['episode_title'] else ''
+
+          # Look for episodes in the detected season
+          season_key = str(entry['season_num'])
+          if season_key in imdb_episode_data[series_imdb_id]:
+            best_match_score = 0
+            best_match_ep = None
+
+            for imdb_ep in imdb_episode_data[series_imdb_id][season_key]:
+              # Compare titles using fuzzy matching
+              imdb_title_score = fuzz.ratio(ruv_episode_title, imdb_ep['title'].lower())
+              imdb_original_score = fuzz.ratio(ruv_episode_title, imdb_ep['original_title'].lower())
+              match_score = max(imdb_title_score, imdb_original_score)
+
+              if match_score > best_match_score and match_score > 70:  # 70% similarity threshold
+                best_match_score = match_score
+                best_match_ep = imdb_ep
+
+            if best_match_ep:
+              imdb_ep_num = best_match_ep['ep_num']
+              # Store match info for debugging
+              entry['imdb_episode_match'] = {
+                'score': best_match_score,
+                'imdb_title': best_match_ep['title'],
+                'tconst': best_match_ep['tconst']
+              }
+
+      # Use IMDB episode number if matched, otherwise use chronological position
+      if imdb_ep_num:
+        entry['ep_num'] = str(imdb_ep_num)
+      else:
+        # Fallback: Use chronological position (after sorting by firstrun date)
+        entry['ep_num'] = str(episode_index + 1)
     else:
       # For movies, documentaries, and sports: Use the original logic
       entry['ep_num'] = str(episode['number']) if 'number' in episode else getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_num', episode['title'])
@@ -1354,34 +1392,41 @@ def loadImdbOriginalTitles(args_imdbfolder):
   return imdb_title_cache
 
 #
-# Loads IMDB episode data from title.episode.tsv to get accurate episode numbers
-# Returns a dict with structure: {parent_tconst: {season: {air_date: episode_number}}}
+# Loads IMDB episode data from title.episode.tsv and title.basics.tsv
+# Returns a dict with structure: {parent_tconst: {season: [{ep_num, title, original_title, tconst}, ...]}}
 def loadImdbEpisodeData(args_imdbfolder):
   imdb_episode_cache = {}
 
   if not args_imdbfolder or args_imdbfolder is None:
+    print(color_warn(f"The '--imdbfolder' argument is not set. For accurate episode numbering with --plex, download title.episode.tsv and title.basics.tsv from https://www.imdb.com/interfaces/"))
     return imdb_episode_cache
 
   if not os.path.exists(args_imdbfolder):
+    print(color_error(f"The IMDB path {args_imdbfolder} does not exist"))
     return imdb_episode_cache
 
   imdb_episode_file_path = os.path.join(args_imdbfolder, "title.episode.tsv")
+  imdb_basics_file_path = os.path.join(args_imdbfolder, "title.basics.tsv")
+
   if not os.path.isfile(imdb_episode_file_path):
     print(color_warn(f"IMDB episode file not found at {imdb_episode_file_path}. Download title.episode.tsv from https://www.imdb.com/interfaces/ for accurate episode numbering."))
+    return imdb_episode_cache
+
+  if not os.path.isfile(imdb_basics_file_path):
+    print(color_warn(f"IMDB basics file not found at {imdb_basics_file_path}. Both title.episode.tsv and title.basics.tsv are needed for episode matching."))
     return imdb_episode_cache
 
   # Check file age
   if isFileOlderThan(imdb_episode_file_path, datetime.timedelta(days=183)):
     print(color_warn(f"The '{imdb_episode_file_path}' file is older than 6 months, consider downloading a newer file from https://www.imdb.com/interfaces/"))
 
-  # title.episode.tsv contains:
-  #   tconst - episode tconst
-  #   parentTconst - series tconst
-  #   seasonNumber - season number
-  #   episodeNumber - episode number within season
+  print(color_info("Processing IMDB episode data for accurate episode numbering"))
 
-  print(color_info("Processing IMDB episode data")+ f" | File {imdb_episode_file_path}")
+  # Step 1: Load episode numbers from title.episode.tsv
+  # Structure: {episode_tconst: {parent_tconst, season, episode_num}}
+  episode_structure = {}
 
+  print(color_info(f"Loading episode structure from title.episode.tsv"))
   printProgress(0, 100, prefix = 'Estimating size:', suffix = 'Working', barLength = 25)
   total_lines = countLinesInFile(imdb_episode_file_path)
   curr_line = 0
@@ -1389,12 +1434,11 @@ def loadImdbEpisodeData(args_imdbfolder):
   with open(imdb_episode_file_path, encoding="utf8") as f:
     for line in f:
       curr_line += 1
-
       if curr_line == 1:  # Skip header
         continue
 
       if curr_line % 50000 == 0:
-        printProgress(curr_line, total_lines, prefix = 'Reading Episode Data:', suffix = f" | item {curr_line:,} of {total_lines:,}", barLength = 25)
+        printProgress(curr_line, total_lines, prefix = 'Reading Episode Structure:', suffix = f" | {curr_line:,} of {total_lines:,}", barLength = 25)
 
       parts = line.strip().split('\t')
       if len(parts) < 4:
@@ -1409,19 +1453,66 @@ def loadImdbEpisodeData(args_imdbfolder):
       if not parent_tconst.startswith('tt') or season_num == '\\N' or episode_num == '\\N':
         continue
 
-      # Build nested structure for fast lookup
+      episode_structure[episode_tconst] = {
+        'parent': parent_tconst,
+        'season': season_num,
+        'episode': episode_num
+      }
+
+  printProgress(total_lines, total_lines, prefix = 'Reading Episode Structure:', suffix = f" | Processed {total_lines:,} items           ", barLength = 25)
+  print()
+
+  # Step 2: Load episode titles from title.basics.tsv and build the final cache
+  print(color_info(f"Loading episode titles from title.basics.tsv"))
+  printProgress(0, 100, prefix = 'Estimating size:', suffix = 'Working', barLength = 25)
+  total_lines = countLinesInFile(imdb_basics_file_path)
+  curr_line = 0
+
+  with open(imdb_basics_file_path, encoding="utf8") as f:
+    for line in f:
+      curr_line += 1
+      if curr_line == 1:  # Skip header
+        continue
+
+      if curr_line % 100000 == 0:
+        printProgress(curr_line, total_lines, prefix = 'Reading Episode Titles:', suffix = f" | {curr_line:,} of {total_lines:,}", barLength = 25)
+
+      parts = line.strip().split('\t')
+      if len(parts) < 9:
+        continue
+
+      tconst = parts[0]
+      titleType = parts[1]
+      primaryTitle = parts[2]
+      originalTitle = parts[3]
+
+      # Only process TV episodes that we have in our episode_structure
+      if titleType != 'tvEpisode' or tconst not in episode_structure:
+        continue
+
+      ep_data = episode_structure[tconst]
+      parent_tconst = ep_data['parent']
+      season_num = ep_data['season']
+      episode_num = ep_data['episode']
+
+      # Build nested cache structure
       if parent_tconst not in imdb_episode_cache:
         imdb_episode_cache[parent_tconst] = {}
 
       if season_num not in imdb_episode_cache[parent_tconst]:
-        imdb_episode_cache[parent_tconst][season_num] = {}
+        imdb_episode_cache[parent_tconst][season_num] = []
 
-      # Store: {parent_tconst: {season: {episode_tconst: episode_number}}}
-      imdb_episode_cache[parent_tconst][season_num][episode_tconst] = episode_num
+      # Store episode data with titles for matching
+      imdb_episode_cache[parent_tconst][season_num].append({
+        'ep_num': episode_num,
+        'title': primaryTitle,
+        'original_title': originalTitle if originalTitle != '\\N' else primaryTitle,
+        'tconst': tconst
+      })
 
-  printProgress(total_lines, total_lines, prefix = 'Reading Episode Data:', suffix = f" | Processed {total_lines:,} items           ", barLength = 25)
+  printProgress(total_lines, total_lines, prefix = 'Reading Episode Titles:', suffix = f" | Processed {total_lines:,} items           ", barLength = 25)
   print()
-  print(color_info(f"Loaded episode data for {len(imdb_episode_cache)} series"))
+  print(color_info(f"Loaded episode data for {len(imdb_episode_cache)} series with episode titles"))
 
   return imdb_episode_cache
 
@@ -1530,9 +1621,10 @@ def runMain():
     schedule = getExistingTvSchedule(tv_schedule_file_name)
     
     if( args.refresh or schedule is None  ):
-    
+
       # Only load the IMDB data if we are refreshing the schedule
       imdb_orignal_titles = loadImdbOriginalTitles(args.imdbfolder)
+      imdb_episode_data = loadImdbEpisodeData(args.imdbfolder)
       imdb_cache_file_name = createFullConfigFileName(args.portable, IMDB_CACHE_FILE)
       imdb_cache = getExistingJsonFile(imdb_cache_file_name)
       if( imdb_cache is None ):
@@ -1544,7 +1636,7 @@ def runMain():
         schedule = {}
       
       # Downloading the full VOD available schedule as well, signal an incremental update if the schedule object has entries in it
-      schedule = getVodSchedule(schedule, len(schedule) > 0, imdb_cache, imdb_orignal_titles) 
+      schedule = getVodSchedule(schedule, len(schedule) > 0, imdb_cache, imdb_orignal_titles, imdb_episode_data) 
     
       # Save the tv schedule as the most current one, save it to ensure we format the today date
       if len(schedule) > 1 :
