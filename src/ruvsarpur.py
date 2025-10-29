@@ -1274,19 +1274,44 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
           episode_range_match = RE_CAPTURE_EPISODE_RANGE.search(entry['desc'])
 
         if episode_range_match:
-          # Calculate episode number from range start + position
           range_start = int(episode_range_match.group('start'))
           range_end = int(episode_range_match.group('end'))
-          calculated_ep_num = range_start + episode_index
 
-          # Validate it's within the stated range
-          if calculated_ep_num <= range_end:
-            entry['ep_num'] = str(calculated_ep_num)
-            print(color_info(f"    ✓ Calculated episode {calculated_ep_num} from range {range_start}-{range_end} (position {episode_index + 1})"))
+          # Check if the API's episode number falls within the stated range
+          api_ep_num = episode.get('number')
+          if api_ep_num and isinstance(api_ep_num, (int, str)):
+            try:
+              api_ep_num_int = int(api_ep_num)
+              if range_start <= api_ep_num_int <= range_end:
+                # The API number is within range - use it!
+                entry['ep_num'] = str(api_ep_num_int)
+                print(color_info(f"    ✓ Using API episode number {api_ep_num_int} (within range {range_start}-{range_end})"))
+              else:
+                # API number is outside range, calculate from position
+                calculated_ep_num = range_start + episode_index
+                if calculated_ep_num <= range_end:
+                  entry['ep_num'] = str(calculated_ep_num)
+                  print(color_warn(f"    ! API number {api_ep_num_int} outside range, calculated {calculated_ep_num} from position"))
+                else:
+                  entry['ep_num'] = str(episode_index + 1)
+                  print(color_warn(f"    ! Both API ({api_ep_num_int}) and calculated ({calculated_ep_num}) outside range {range_start}-{range_end}, using position"))
+            except (ValueError, TypeError):
+              # Can't parse API number, fall back to calculation
+              calculated_ep_num = range_start + episode_index
+              if calculated_ep_num <= range_end:
+                entry['ep_num'] = str(calculated_ep_num)
+                print(color_info(f"    ✓ Calculated episode {calculated_ep_num} from range {range_start}-{range_end} (position {episode_index + 1})"))
+              else:
+                entry['ep_num'] = str(episode_index + 1)
           else:
-            # Beyond the range, just use position
-            entry['ep_num'] = str(episode_index + 1)
-            print(color_warn(f"    ! Calculated ep {calculated_ep_num} exceeds range {range_start}-{range_end}, using position {episode_index + 1}"))
+            # No API number, calculate from position
+            calculated_ep_num = range_start + episode_index
+            if calculated_ep_num <= range_end:
+              entry['ep_num'] = str(calculated_ep_num)
+              print(color_info(f"    ✓ Calculated episode {calculated_ep_num} from range {range_start}-{range_end} (position {episode_index + 1})"))
+            else:
+              entry['ep_num'] = str(episode_index + 1)
+              print(color_warn(f"    ! Calculated ep {calculated_ep_num} exceeds range {range_start}-{range_end}, using position {episode_index + 1}"))
         else:
           # Fallback: Use chronological position (after sorting by firstrun date)
           entry['ep_num'] = str(episode_index + 1)
