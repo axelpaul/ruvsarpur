@@ -1115,6 +1115,14 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
   # This is necessary because the RÚV API's 'number' field is unreliable
   sorted_episodes = sorted(prog['episodes'], key=lambda ep: ep.get('firstrun', ''))
 
+  # Detect duplicate episode numbers in the original API data for TV shows
+  if not isMovie and not isDocumentary and not isSport:
+    api_episode_numbers = [ep.get('number') for ep in prog['episodes'] if 'number' in ep]
+    if len(api_episode_numbers) != len(set(api_episode_numbers)):
+      duplicates = [num for num in api_episode_numbers if api_episode_numbers.count(num) > 1]
+      print(color_warn(f"Warning: Series '{series_title}' (sid:{sid}) has duplicate episode numbers in RÚV API: {set(duplicates)}"))
+      print(color_info(f"  Using chronological ordering instead. Total episodes in API: {len(prog['episodes'])}"))
+
   for episode_index, episode in enumerate(sorted_episodes):
     entry = {}
 
@@ -1178,6 +1186,12 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
     # FIX: The RÚV API's 'number' field is unreliable and can contain duplicate values
     # (e.g., multiple episodes labeled as episode 11). For TV shows, we sort episodes
     # by their firstrun date and use the chronological position as the episode number.
+    #
+    # IMPORTANT ASSUMPTION: This fix assumes that the RÚV API returns ALL episodes from
+    # a season (not just a subset of available episodes). If only some episodes are
+    # available, the position-based numbering may not match the actual broadcast episode
+    # numbers. In such cases, IMDB episode data integration would be needed for accuracy.
+    #
     # For movies, documentaries, and sports, preserve the original behavior.
     if not isMovie and not isDocumentary and not isSport:
       # For TV shows: Use chronological position (after sorting by firstrun date)
@@ -1338,6 +1352,78 @@ def loadImdbOriginalTitles(args_imdbfolder):
   print()
 
   return imdb_title_cache
+
+#
+# Loads IMDB episode data from title.episode.tsv to get accurate episode numbers
+# Returns a dict with structure: {parent_tconst: {season: {air_date: episode_number}}}
+def loadImdbEpisodeData(args_imdbfolder):
+  imdb_episode_cache = {}
+
+  if not args_imdbfolder or args_imdbfolder is None:
+    return imdb_episode_cache
+
+  if not os.path.exists(args_imdbfolder):
+    return imdb_episode_cache
+
+  imdb_episode_file_path = os.path.join(args_imdbfolder, "title.episode.tsv")
+  if not os.path.isfile(imdb_episode_file_path):
+    print(color_warn(f"IMDB episode file not found at {imdb_episode_file_path}. Download title.episode.tsv from https://www.imdb.com/interfaces/ for accurate episode numbering."))
+    return imdb_episode_cache
+
+  # Check file age
+  if isFileOlderThan(imdb_episode_file_path, datetime.timedelta(days=183)):
+    print(color_warn(f"The '{imdb_episode_file_path}' file is older than 6 months, consider downloading a newer file from https://www.imdb.com/interfaces/"))
+
+  # title.episode.tsv contains:
+  #   tconst - episode tconst
+  #   parentTconst - series tconst
+  #   seasonNumber - season number
+  #   episodeNumber - episode number within season
+
+  print(color_info("Processing IMDB episode data")+ f" | File {imdb_episode_file_path}")
+
+  printProgress(0, 100, prefix = 'Estimating size:', suffix = 'Working', barLength = 25)
+  total_lines = countLinesInFile(imdb_episode_file_path)
+  curr_line = 0
+
+  with open(imdb_episode_file_path, encoding="utf8") as f:
+    for line in f:
+      curr_line += 1
+
+      if curr_line == 1:  # Skip header
+        continue
+
+      if curr_line % 50000 == 0:
+        printProgress(curr_line, total_lines, prefix = 'Reading Episode Data:', suffix = f" | item {curr_line:,} of {total_lines:,}", barLength = 25)
+
+      parts = line.strip().split('\t')
+      if len(parts) < 4:
+        continue
+
+      episode_tconst = parts[0]
+      parent_tconst = parts[1]
+      season_num = parts[2]
+      episode_num = parts[3]
+
+      # Skip invalid entries
+      if not parent_tconst.startswith('tt') or season_num == '\\N' or episode_num == '\\N':
+        continue
+
+      # Build nested structure for fast lookup
+      if parent_tconst not in imdb_episode_cache:
+        imdb_episode_cache[parent_tconst] = {}
+
+      if season_num not in imdb_episode_cache[parent_tconst]:
+        imdb_episode_cache[parent_tconst][season_num] = {}
+
+      # Store: {parent_tconst: {season: {episode_tconst: episode_number}}}
+      imdb_episode_cache[parent_tconst][season_num][episode_tconst] = episode_num
+
+  printProgress(total_lines, total_lines, prefix = 'Reading Episode Data:', suffix = f" | Processed {total_lines:,} items           ", barLength = 25)
+  print()
+  print(color_info(f"Loaded episode data for {len(imdb_episode_cache)} series"))
+
+  return imdb_episode_cache
 
 def searchForItemsInTvSchedule(args, schedule):
   download_list = []
