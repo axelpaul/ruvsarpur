@@ -1225,6 +1225,10 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
           # Try to match by episode title using fuzzy matching
           ruv_episode_title = entry['episode_title'].lower() if entry['episode_title'] else ''
 
+          # DEBUG: Show episode matching attempt
+          if ruv_episode_title:
+            print(color_info(f"  Matching episode '{entry['episode_title']}' (pid:{entry['pid']}) for season {entry['season_num']}"))
+
           # Look for episodes in the detected season
           season_key = str(entry['season_num'])
           if season_key in imdb_episode_data[series_imdb_id]:
@@ -1243,12 +1247,18 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
 
             if best_match_ep:
               imdb_ep_num = best_match_ep['ep_num']
+              print(color_info(f"    ✓ Matched to IMDB S{season_key}E{imdb_ep_num}: '{best_match_ep['title']}' (score: {best_match_score})"))
               # Store match info for debugging
               entry['imdb_episode_match'] = {
                 'score': best_match_score,
                 'imdb_title': best_match_ep['title'],
                 'tconst': best_match_ep['tconst']
               }
+            elif ruv_episode_title:
+              print(color_warn(f"    ✗ No IMDB match found (best score < 70)"))
+          else:
+            if ruv_episode_title:
+              print(color_warn(f"    ✗ No IMDB episode data for season {entry['season_num']}"))
 
       # Use IMDB episode number if matched, otherwise use chronological position
       if imdb_ep_num:
