@@ -1183,6 +1183,27 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
     entry['multiple_episodes'] = prog['multiple_episodes']
     entry['web_available_episodes'] = prog['web_available_episodes']
 
+    # Attempt to parse out the season number FIRST (needed for IMDB matching), start with 1 as the default
+    entry['season_num'] = '1'
+    if str(series_title_wseason).endswith(' 2') or str(series_title_wseason).endswith(' II') or str(foreign_title).endswith(' II') or 'önnur þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '2'
+    elif str(series_title_wseason).endswith(' 3') or str(series_title_wseason).endswith(' III') or str(foreign_title).endswith(' III') or 'þriðja þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '3'
+    elif str(series_title_wseason).endswith(' 4') or str(series_title_wseason).endswith(' IV') or str(foreign_title).endswith(' IV') or 'fjórða þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '4'
+    elif str(series_title_wseason).endswith(' 5') or str(series_title_wseason).endswith(' V') or str(foreign_title).endswith(' V') or 'fimmta þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '5'
+    elif str(series_title_wseason).endswith(' 6') or str(series_title_wseason).endswith(' VI') or str(foreign_title).endswith(' VI') or 'sjötta þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '6'
+    elif str(series_title_wseason).endswith(' 7') or str(series_title_wseason).endswith(' VII') or str(foreign_title).endswith(' VII') or 'sjöunda þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '7'
+    elif str(series_title_wseason).endswith(' 8') or  str(series_title_wseason).endswith(' VIII') or str(foreign_title).endswith(' VIII') or 'áttunda þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '8'
+    elif str(series_title_wseason).endswith(' 9') or str(series_title_wseason).endswith(' IX') or str(foreign_title).endswith(' IX') or 'níunda þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '9'
+    elif str(series_title_wseason).endswith(' 10') or str(series_title_wseason).endswith(' XX') or str(foreign_title).endswith(' XX') or 'tíunda þáttaröð' in str(entry['desc']).lower():
+      entry['season_num'] = '10'
+
     # FIX: The RÚV API's 'number' field is unreliable and can contain duplicate values.
     # Solution: Use IMDB episode data when available, otherwise fall back to chronological position.
     #
@@ -1246,29 +1267,8 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
     entry['ep_total'] = getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_total', episode['title'])
     if not entry['ep_total'] is None:
       entry['ep_total'] = str(entry['ep_total'])
-    else: 
+    else:
       entry['ep_total'] = str(len(prog['episodes']))
-
-    # Attempt to parse out the season number, start with 1 as the default
-    entry['season_num'] = '1'
-    if str(series_title_wseason).endswith(' 2') or str(series_title_wseason).endswith(' II') or str(foreign_title).endswith(' II') or 'önnur þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '2'
-    elif str(series_title_wseason).endswith(' 3') or str(series_title_wseason).endswith(' III') or str(foreign_title).endswith(' III') or 'þriðja þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '3'
-    elif str(series_title_wseason).endswith(' 4') or str(series_title_wseason).endswith(' IV') or str(foreign_title).endswith(' IV') or 'fjórða þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '4'
-    elif str(series_title_wseason).endswith(' 5') or str(series_title_wseason).endswith(' V') or str(foreign_title).endswith(' V') or 'fimmta þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '5'
-    elif str(series_title_wseason).endswith(' 6') or str(series_title_wseason).endswith(' VI') or str(foreign_title).endswith(' VI') or 'sjötta þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '6'
-    elif str(series_title_wseason).endswith(' 7') or str(series_title_wseason).endswith(' VII') or str(foreign_title).endswith(' VII') or 'sjöunda þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '7'
-    elif str(series_title_wseason).endswith(' 8') or  str(series_title_wseason).endswith(' VIII') or str(foreign_title).endswith(' VIII') or 'áttunda þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '8'
-    elif str(series_title_wseason).endswith(' 9') or str(series_title_wseason).endswith(' IX') or str(foreign_title).endswith(' IX') or 'níunda þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '9'
-    elif str(series_title_wseason).endswith(' 10') or str(series_title_wseason).endswith(' XX') or str(foreign_title).endswith(' XX') or 'tíunda þáttaröð' in str(entry['desc']).lower():
-      entry['season_num'] = '10'
 
     # Create the episode numbers programatically to ensure consistency if we're dealing with multi-episode program
     if not entry['ep_total'] is None and int(entry['ep_total']) > 1:
