@@ -903,6 +903,9 @@ def findffmpeg(path_to_ffmpeg_install=None, working_dir=None):
 # Regex to extract the necessary VOD data from the files url
 RE_CAPTURE_VOD_EPNUM_FROM_TITLE = re.compile(r'(?P<ep_num>\d+) af (?P<ep_total>\d+)', re.IGNORECASE)
 
+# Regex to extract episode range from description (e.g., "Þættir 38-50" → episodes 38-50)
+RE_CAPTURE_EPISODE_RANGE = re.compile(r'[Þþ]ættir?\s+(?P<start>\d+)\s*[-–]\s*(?P<end>\d+)', re.IGNORECASE)
+
 #
 # Downloads the full front page VOD schedule and for each episode in there fetches all available episodes
 # uses the new RUV GraphQL queries
@@ -1261,12 +1264,32 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, imdb_episode_d
             if ruv_episode_title:
               print(color_warn(f"    ✗ No IMDB episode data for season {entry['season_num']}"))
 
-      # Use IMDB episode number if matched, otherwise use chronological position
+      # Use IMDB episode number if matched, otherwise try episode range from description
       if imdb_ep_num:
         entry['ep_num'] = str(imdb_ep_num)
       else:
-        # Fallback: Use chronological position (after sorting by firstrun date)
-        entry['ep_num'] = str(episode_index + 1)
+        # Try to extract episode range from description (e.g., "Þættir 38-50")
+        episode_range_match = None
+        if 'desc' in entry and entry['desc']:
+          episode_range_match = RE_CAPTURE_EPISODE_RANGE.search(entry['desc'])
+
+        if episode_range_match:
+          # Calculate episode number from range start + position
+          range_start = int(episode_range_match.group('start'))
+          range_end = int(episode_range_match.group('end'))
+          calculated_ep_num = range_start + episode_index
+
+          # Validate it's within the stated range
+          if calculated_ep_num <= range_end:
+            entry['ep_num'] = str(calculated_ep_num)
+            print(color_info(f"    ✓ Calculated episode {calculated_ep_num} from range {range_start}-{range_end} (position {episode_index + 1})"))
+          else:
+            # Beyond the range, just use position
+            entry['ep_num'] = str(episode_index + 1)
+            print(color_warn(f"    ! Calculated ep {calculated_ep_num} exceeds range {range_start}-{range_end}, using position {episode_index + 1}"))
+        else:
+          # Fallback: Use chronological position (after sorting by firstrun date)
+          entry['ep_num'] = str(episode_index + 1)
     else:
       # For movies, documentaries, and sports: Use the original logic
       entry['ep_num'] = str(episode['number']) if 'number' in episode else getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_num', episode['title'])
