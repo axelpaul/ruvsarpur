@@ -616,7 +616,8 @@ def download_m3u8_playlist_using_ffmpeg(ffmpegexec, playlist_url, playlist_fragm
   return None
   
 def printTvShowDetails(args, show):
-  if( not 'pid' in show ):
+  # Skip non-dict items (like the 'date' datetime object in schedule)
+  if not isinstance(show, dict) or 'pid' not in show:
     return
 
   # Mark all VOD sourced shows
