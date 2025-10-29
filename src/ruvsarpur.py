@@ -1111,7 +1111,11 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
         'imdb': imdb_result
       }
 
-  for episode in prog['episodes']:
+  # Sort episodes by firstrun date to ensure chronological order (oldest first)
+  # This is necessary because the RÚV API's 'number' field is unreliable
+  sorted_episodes = sorted(prog['episodes'], key=lambda ep: ep.get('firstrun', ''))
+
+  for episode_index, episode in enumerate(sorted_episodes):
     entry = {}
 
     entry['imdb'] = imdb_result
@@ -1125,7 +1129,7 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
     # Fix the episode description if needed
     episode['description'] = ' '.join(episode['description']) if type(episode['description']) is list else episode['description']
     # Fix episode title
-    if episode['title'] is None: 
+    if episode['title'] is None:
       #episode['title'] = series_title
       episode['title'] = ''
 
@@ -1171,11 +1175,21 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
     entry['multiple_episodes'] = prog['multiple_episodes']
     entry['web_available_episodes'] = prog['web_available_episodes']
 
-    entry['ep_num'] = str(episode['number']) if 'number' in episode else getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_num', episode['title'])
-    if not entry['ep_num'] is None:
-      entry['ep_num'] = str(entry['ep_num'])
+    # FIX: The RÚV API's 'number' field is unreliable and can contain duplicate values
+    # (e.g., multiple episodes labeled as episode 11). For TV shows, we sort episodes
+    # by their firstrun date and use the chronological position as the episode number.
+    # For movies, documentaries, and sports, preserve the original behavior.
+    if not isMovie and not isDocumentary and not isSport:
+      # For TV shows: Use chronological position (after sorting by firstrun date)
+      # This ensures episodes are numbered correctly even if the API's 'number' field is wrong
+      entry['ep_num'] = str(episode_index + 1)
     else:
-      entry['ep_num'] = str(total_episodes)
+      # For movies, documentaries, and sports: Use the original logic
+      entry['ep_num'] = str(episode['number']) if 'number' in episode else getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_num', episode['title'])
+      if not entry['ep_num'] is None:
+        entry['ep_num'] = str(entry['ep_num'])
+      else:
+        entry['ep_num'] = str(total_episodes)
     
     entry['ep_total'] = getGroup(RE_CAPTURE_VOD_EPNUM_FROM_TITLE, 'ep_total', episode['title'])
     if not entry['ep_total'] is None:
