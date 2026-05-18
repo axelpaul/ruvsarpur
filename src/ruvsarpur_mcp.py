@@ -262,6 +262,18 @@ class Job:
 _JOBS: dict[str, Job] = {}
 _JOBS_LOCK = threading.Lock()
 
+# Only one refresh may run at a time, and downloads must not run while a
+# refresh is rewriting tvschedule.json underneath them. Held for the
+# lifetime of a refresh job; downloads check it before starting.
+_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_in_progress() -> bool:
+    if _REFRESH_LOCK.acquire(blocking=False):
+        _REFRESH_LOCK.release()
+        return False
+    return True
+
 
 def _persist_jobs(portable: bool) -> None:
     """Append a snapshot of finished/cancelled jobs to disk."""
@@ -302,6 +314,10 @@ def _spawn_job(kind: str, cmd: list[str], meta: dict, portable: bool) -> Job:
         _JOBS[job.id] = job
 
     def runner() -> None:
+        # Refresh jobs serialize against each other and against any download
+        # so the schedule file isn't read while it's being rewritten.
+        if kind == "refresh":
+            _REFRESH_LOCK.acquire()
         job.status = "running"
         job.started_at = time.time()
         try:
@@ -337,6 +353,11 @@ def _spawn_job(kind: str, cmd: list[str], meta: dict, portable: bool) -> Job:
                 except Exception:
                     pass
             _persist_jobs(portable)
+            if kind == "refresh":
+                try:
+                    _REFRESH_LOCK.release()
+                except RuntimeError:
+                    pass
 
     threading.Thread(target=runner, daemon=True).start()
     return job
@@ -346,7 +367,10 @@ def _build_download_cmd(
     pid: Optional[str], sid: Optional[str], quality: str,
     output: Optional[str], plex: bool, original_title: bool,
     suffix: Optional[str], force: bool, portable: bool,
-    ffmpeg: Optional[str], extra_args: Optional[list[str]],
+    ffmpeg: Optional[str],
+    keep_partial: bool = False, check_local: bool = False,
+    no_metadata: bool = False, no_video: bool = False,
+    include_english_subs: bool = False,
 ) -> list[str]:
     cmd: list[str] = [sys.executable, str(SCRIPT_PATH)]
     if pid:
@@ -368,8 +392,16 @@ def _build_download_cmd(
         cmd += ["--portable"]
     if ffmpeg:
         cmd += ["--ffmpeg", ffmpeg]
-    if extra_args:
-        cmd += list(extra_args)
+    if keep_partial:
+        cmd += ["--keeppartial"]
+    if check_local:
+        cmd += ["--checklocal"]
+    if no_metadata:
+        cmd += ["--nometadata"]
+    if no_video:
+        cmd += ["--novideo"]
+    if include_english_subs:
+        cmd += ["--includeenglishsubs"]
     return cmd
 
 
@@ -380,7 +412,13 @@ def _build_download_cmd(
 @mcp.tool()
 def refresh_schedule(incremental: bool = True, force: bool = False,
                      portable: bool = False) -> dict:
-    """Refresh the TV schedule. Starts a background job; poll get_job_status."""
+    """Refresh the TV schedule. Starts a background job; poll get_job_status.
+
+    Refuses to start while another refresh is already running.
+    """
+    if _refresh_in_progress():
+        return {"error": "A refresh is already in progress.",
+                "refresh_in_progress": True}
     cmd = [sys.executable, str(SCRIPT_PATH), "--refresh", "--list"]
     if incremental:
         cmd.append("--incremental")
@@ -405,13 +443,17 @@ def start_download(
     force: bool = False,
     portable: bool = False,
     ffmpeg: Optional[str] = None,
-    extra_args: Optional[list[str]] = None,
+    keep_partial: bool = False,
+    check_local: bool = False,
+    no_metadata: bool = False,
+    no_video: bool = False,
+    include_english_subs: bool = False,
 ) -> dict:
     """Download one or more episodes. Returns a job id immediately.
 
     Provide pid (single episode) or sid (whole series). quality is one of
-    Normal, HD720, HD1080. extra_args is an escape hatch for any other
-    ruvsarpur flag not surfaced here.
+    Normal, HD720, HD1080. Refuses to start while a schedule refresh is in
+    progress (the schedule file would be rewritten underneath the download).
     """
     if not pid and not sid:
         return {"error": "Provide pid or sid."}
@@ -419,9 +461,16 @@ def start_download(
         return {
             "error": f"Unknown quality. Choose one of: {list(ruv.QUALITY_BITRATE)}",
         }
+    if _refresh_in_progress():
+        return {"error": "A schedule refresh is in progress; try again "
+                         "after it finishes.",
+                "refresh_in_progress": True}
     cmd = _build_download_cmd(
         pid, sid, quality, output, plex, original_title, suffix,
-        force, portable, ffmpeg, extra_args,
+        force, portable, ffmpeg,
+        keep_partial=keep_partial, check_local=check_local,
+        no_metadata=no_metadata, no_video=no_video,
+        include_english_subs=include_english_subs,
     )
     # Best-effort title resolution from the cached schedule for nicer history.
     index = _build_schedule_index(_load_schedule(portable))
@@ -596,6 +645,10 @@ def download_watchlist(
     matching job ends with status 'succeeded' the entry's status is updated
     to 'downloaded' (poll list_watchlist after jobs finish).
     """
+    if _refresh_in_progress():
+        return {"error": "A schedule refresh is in progress; try again "
+                         "after it finishes.",
+                "refresh_in_progress": True, "started": 0, "jobs": []}
     items = _watchlist_load(portable)
     started: list[dict] = []
     for entry in items:
@@ -605,7 +658,7 @@ def download_watchlist(
             entry.get("pid"), entry.get("sid"), entry.get("quality", "Normal"),
             entry.get("output"), entry.get("plex", False),
             entry.get("original_title", False), entry.get("suffix"),
-            force, portable, ffmpeg, None,
+            force, portable, ffmpeg,
         )
         meta = {
             "watchlist_entry": entry["id"],

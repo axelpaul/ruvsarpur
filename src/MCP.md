@@ -91,5 +91,11 @@ Watchlist (server-side queue — ruvsarpur itself has no concept of one):
   id. Agents poll `get_job_status` instead of blocking on ffmpeg.
 - Job history is persisted to `mcp_jobs.json`; the watchlist lives in
   `mcp_watchlist.json`. Both files follow `--portable`.
-- `start_download` has an `extra_args` escape hatch for any flag not
-  surfaced as a parameter (e.g. `--checklocal`, `--keeppartial`).
+- `start_download` exposes ruvsarpur flags as explicit named parameters
+  (`keep_partial`, `check_local`, `no_metadata`, `no_video`,
+  `include_english_subs`). There is intentionally no `extra_args` escape
+  hatch — anything outside the allow-list has to go through the bare CLI.
+- A schedule refresh holds a mutex for its lifetime; `start_download` and
+  `download_watchlist` refuse to start while one is in progress (they
+  return `refresh_in_progress: true` so the agent can wait and retry).
+  Only one refresh runs at a time.
