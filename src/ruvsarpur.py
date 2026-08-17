@@ -31,6 +31,8 @@ Author: Sverrir Sigmundarson  info@sverrirs.com  https://www.sverrirs.com
 import sys, os.path, re, time
 from os import sep
 import traceback   # For exception details
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import textwrap # For text wrapping in the console window
 from colorama import init, deinit # For colorized output to console windows (platform and shell independent)
 from termcolor import colored # For shorthand color printing to the console, https://pypi.python.org/pypi/termcolor
@@ -411,9 +413,10 @@ def __create_retry_session(retries=5):
 # Returns all currently VOD-available program ids from the category feed. The
 # featured feed used by getVodSchedule omits standalone films and older items,
 # so this is used only to discover programs that are missing from that feed.
-def getVodCategoryPrograms():
+def getVodCategoryPrograms(session=None):
   try:
-    request = __create_retry_session().post(
+    session = session or __create_retry_session()
+    request = session.post(
       RUV_CATEGORY_GRAPHQL_URL,
       json=RUV_CATEGORY_GRAPHQL_QUERY,
       timeout=30)
@@ -691,7 +694,7 @@ def parseArguments():
   parser.add_argument("--imdbfolder", help="Folder storing the downloaded and unzipped title.basics.tsv database snapshot from IMDB, see https://www.imdb.com/interfaces/", 
                                       type=str)
 
-  parser.add_argument("--incremental", help="Performs fast incremental intra-day refreshes. Setting this switch instructs the refresh mechanism to only download information for items that are new since the last full TV schedule refresh from the same day. This option has no effect and a full refresh is performed if the date of this refresh is newer than the latest refresh data. ", action="store_true")
+  parser.add_argument("--incremental", help="Performs a fast incremental refresh using the cached TV schedule and only loads programs whose available episode count changed.", action="store_true")
 
   parser.add_argument("--plex", help="Creates Plex Media Server compatible file names and folder structures. See https://support.plex.tv/articles/naming-and-organizing-your-tv-show-files/", action="store_true")
 
@@ -951,7 +954,8 @@ def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache
   # https://api.ruv.is/api/programs/get_ids/32978
 
   ruv_api_url_all = 'https://api.ruv.is/api/programs/featured/tv'
-  r = __create_retry_session().get(ruv_api_url_all)  
+  request_session = __create_retry_session()
+  r = request_session.get(ruv_api_url_all)
   api_data = r.json()
 
   # Now the api returns everything categorised into panels
@@ -969,15 +973,21 @@ def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache
   # The featured feed omits some standalone films and older VOD programs.
   # Discover those ids from the category feed, then let the existing exact-id
   # loader fetch their complete episode metadata below.
-  category_programs = getVodCategoryPrograms()
+  category_programs = getVodCategoryPrograms(request_session)
   featured_program_ids = set(str(item['id']) for item in data if 'id' in item)
   data.extend(program for program in category_programs
               if str(program.get('id')) not in featured_program_ids)
-  schedule = {}  
+  schedule = {}
 
-  # If we are dealing with incremental refresh then start by storing our existing schedule
-  if args_incremental_refresh:
-    schedule = existing_schedule
+  # Keep only cached entries whose program is still currently available. This
+  # lets incremental refreshes reuse unchanged program details without keeping
+  # stale programs that disappeared from RUV.
+  if args_incremental_refresh and existing_schedule:
+    available_program_ids = {str(program['id']) for program in data if 'id' in program}
+    schedule = {
+      key: value for key, value in existing_schedule.items()
+      if isinstance(value, dict) and str(value.get('sid')) in available_program_ids
+    }
 
   if r.status_code != 200  or data is None or len(data) < 1:
     return schedule
@@ -988,43 +998,59 @@ def getVodSchedule(existing_schedule, args_incremental_refresh=False, imdb_cache
   # Filter out all programs that do not have any vod files to download and have an id field
   panels = [p for p in data if 'web_available_episodes' in p and 'id' in p and p['web_available_episodes'] > 0]
 
-  completed_programs = 0
-  total_programs = len(panels)
-  
-  print("{0} | Total: {1} series available".format(color_title('Downloading VOD schedule'), total_programs))
-  printProgress(completed_programs, total_programs, prefix = 'Reading:', suffix = '', barLength = 25)
 
-  # Now iterate first through every group and for every thing in the group request all episodes for that 
-  # item (there is no programmatic way of distinguishing between how many episodes there are)
+  # Only fetch details for programs that are new or whose available
+  # episode count changed. Full refreshes can use a small worker pool because
+  # each program request is independent; the limit avoids flooding RUV.
+  programs_to_load = []
   for program in panels:
-    completed_programs += 1
-
-    #if str(program['id']) != '32957': 
-    #  continue
-
-    # If incremental, then check if we already have this series if we don't we want to add it, 
-    # if we have the series check if the web_available_episodes match if not then we want to re-add it
     if args_incremental_refresh:
-      existing_vod_episodes_count = sum(type(schedule[p]) is dict and schedule[p]['sid'] == str(program['id']) for p in schedule)
-      if( program['web_available_episodes'] <= existing_vod_episodes_count and existing_vod_episodes_count > 0 ):
+      existing_vod_episodes_count = sum(
+        type(schedule[p]) is dict and schedule[p]['sid'] == str(program['id'])
+        for p in schedule
+      )
+      if (program['web_available_episodes'] <= existing_vod_episodes_count
+          and existing_vod_episodes_count > 0):
         continue
-      else:
-        existing_vs_new_diff = program['web_available_episodes'] - existing_vod_episodes_count
-        printProgress(completed_programs, total_programs, prefix = 'Detected {0} new entries for {1}:'.format(existing_vs_new_diff, color_sid(program['title'])), suffix ='', barLength = 25)
+    programs_to_load.append(program)
 
-    # Add all details for the given program to the schedule
-    try:
-      # We want to not override existing items in the schedule dictionary in case they are downloaded again
-      program_schedule = getVodSeriesSchedule(program['id'], program, imdb_cache, imdb_orignal_titles)
-      # This joining of the two dictionaries below is necessary to ensure that 
-      # the existing items are not overwritten, therefore schedule is appended to the new list, existing items overwriting any new items.
-      #schedule = dict(list(program_schedule.items()) + list(schedule.items())) 
-      schedule.update(program_schedule) # Want to override existing keys again!
-    except Exception as ex:
-        print( "Unable to retrieve schedule for VOD program '{0}', no episodes will be available for download from this program.".format(program['title']))
+  if not programs_to_load:
+    return schedule
+
+  try:
+    max_workers = max(1, int(os.getenv('RUVSARPUR_VOD_WORKERS', '4')))
+  except (TypeError, ValueError):
+    max_workers = 4
+  max_workers = min(max_workers, len(programs_to_load))
+  thread_local = threading.local()
+
+  def load_program(program):
+    if not hasattr(thread_local, 'session'):
+      thread_local.session = __create_retry_session()
+    return getVodSeriesSchedule(
+      program['id'], program, imdb_cache, imdb_orignal_titles,
+      session=thread_local.session)
+
+  completed_programs = 0
+  total_programs = len(programs_to_load)
+  printProgress(completed_programs, total_programs,
+                prefix='Reading:', suffix='', barLength=25)
+
+  with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    futures = {
+      executor.submit(load_program, program): program
+      for program in programs_to_load
+    }
+    for future in as_completed(futures):
+      program = futures[future]
+      try:
+        schedule.update(future.result())
+      except Exception:
+        print("Unable to retrieve schedule for VOD program '{0}', no episodes will be available from this program.".format(program['title']))
         print(traceback.format_exc())
-        continue
-    printProgress(completed_programs, total_programs, prefix = 'Reading:', suffix ='', barLength = 25)
+      completed_programs += 1
+      printProgress(completed_programs, total_programs,
+                    prefix='Reading:', suffix='', barLength=25)
 
   return schedule
 
@@ -1066,13 +1092,14 @@ def formatCoverArtResolutionMacro(rawsrc):
 
 #
 # Given a series id and program data, downloads all episodes available for that series
-def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles):
-  schedule = {}  
+def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, session=None):
+  schedule = {}
 
   # Perform two lookups, first to the API as this gives us a more complete information about the series, but unfortunately no episode data
   ruv_api_url_sid = 'https://api.ruv.is/api/programs/program/{0}/all'.format(sid)
 
-  r = __create_retry_session().get(ruv_api_url_sid)  
+  session = session or __create_retry_session()
+  r = session.get(ruv_api_url_sid)
   prog = r.json()  
   if r.status_code != 200 or prog is None or not 'episodes' in prog or len(prog['episodes']) < 1:
     return schedule
@@ -1479,14 +1506,17 @@ def runMain():
       if( imdb_cache is None ):
         imdb_cache = {}
 
-      # Only clear out the schedule if we are not dealing with an incremental update
-      # or if the dates don't match anymore 
-      if not args.incremental or schedule['date'].date() < today or args.force:
+      # Incremental refreshes can safely reuse the cached schedule across
+      # dates; getVodSchedule removes programs no longer present in RUV.
+      # A missing cache, --force, or a normal --refresh performs a full load.
+      if not args.incremental or schedule is None or args.force:
         schedule = {}
-      
-      # Downloading the full VOD available schedule as well, signal an incremental update if the schedule object has entries in it
-      schedule = getVodSchedule(schedule, len(schedule) > 0, imdb_cache, imdb_orignal_titles) 
-    
+
+      # Download the VOD schedule, reusing unchanged program details when the
+      # incremental cache is available.
+      incremental_refresh = args.incremental and len(schedule) > 0
+      schedule = getVodSchedule(schedule, incremental_refresh, imdb_cache, imdb_orignal_titles)
+
       # Save the tv schedule as the most current one, save it to ensure we format the today date
       if len(schedule) > 1 :
         saveCurrentTvSchedule(schedule, tv_schedule_file_name)
