@@ -79,7 +79,8 @@ color_progress_remaining = lambda x: colored(x, 'white')
 color_progress_percent = lambda x: colored(x, 'green')
 
 # The name of the directory used to store log files.  The directory will be located in the users home directory
-LOG_DIR="{0}/{1}".format(os.path.expanduser('~'),'.ruvsarpur')
+# Can be overridden with the RUVSARPUR_CONFIG_DIR environment variable (used by the MCP server)
+LOG_DIR=os.getenv('RUVSARPUR_CONFIG_DIR') or "{0}/{1}".format(os.path.expanduser('~'),'.ruvsarpur')
 
 # Name of the log file containing the previously recorded shows
 PREV_LOG_FILE = 'prevrecorded.log'
@@ -1171,7 +1172,7 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, session=None):
       imdb_result = lookupItemInIMDB(series_title, series_year, series_type, sample_duration_sec, total_episode_num, isIcelandic, imdb_orignal_titles)
 
     # If the imdb result was found then store it in the corrections file for later reuse
-    if not imdb_result is None:
+    if not imdb_result is None and not imdb_cache is None:
       imdb_cache[str(sid)] = {
         'series_id': sid,
         'original-title': foreign_title, 
@@ -1296,7 +1297,7 @@ def getVodSeriesSchedule(sid, _, imdb_cache, imdb_orignal_titles, session=None):
         entry['title'] = f"{entry['series_title']} ({entry['episode_title']}) {str(entry['showtime'])[8:10]}.{str(MONTH_NAMES[int(entry['showtime'][5:7])])} kl.{(str(entry['showtime'])[11:16]).replace(':','.')}"
 
       # We cannot use seasons numbers that are longer than 999 as there are only three digits allowed for season numbers
-      entry['sport_season'] = entry['showtime'][:4] if 'showtime' in entry and not entry['showtime'] is None and len(entry['showtime']) > 4 else str(date.today().year)
+      entry['sport_season'] = entry['showtime'][:4] if 'showtime' in entry and not entry['showtime'] is None and len(entry['showtime']) > 4 else str(datetime.date.today().year)
 
     schedule[entry['pid']] = entry
 
