@@ -33,6 +33,13 @@ If you are intending on using this tool outside of Iceland then I recommend a [V
 - [Plex MediaServer Compatibility](#plex-mediaserver-compatibility)
   - [Downloading of series and movie posters and splash screens](#downloading-of-series-and-movie-posters-and-splash-screens)
   - [Integration with IMDB for correct series and movie names](#integration-with-imdb-for-correct-series-and-movie-names)
+- [Managing ruvsarpur from an AI agent (MCP server)](#managing-ruvsarpur-from-an-ai-agent-mcp-server)
+  - [Installing](#installing)
+  - [Connecting your agent](#connecting-your-agent)
+  - [Available tools](#available-tools)
+  - [Monitors](#monitors)
+  - [Running monitors on a schedule](#running-monitors-on-a-schedule)
+  - [Where state is stored](#where-state-is-stored)
 - [Frequently Asked Questions](#frequently-asked-questions)
     - [I get an AttributeError when executing the script](#i-get-an-attributeerror-when-executing-the-script)
     - [I keep getting a message `SHOW_TITLE not found on server (pid=PID_NUMBER)` when trying to download using your script.](#i-keep-getting-a-message-show_title-not-found-on-server-pidpid_number-when-trying-to-download-using-your-script)
@@ -301,6 +308,84 @@ Will perform a full refresh of all metadata and artwork for Hvolpasveitin, inclu
 The script attempts to match shows and movies to the correct IMDB ID. This is done based on the shows title. For non-english shows this matching can be improved drastically by using the `--imdbfolder` hand having it point to a local copy of the `title.basics.tsv` file that can be obtained from https://www.imdb.com/interfaces/.
 
 The script will warn you to update this file when the local file is older than 6 months.
+
+# Managing ruvsarpur from an AI agent (MCP server)
+[`ruvsarpur_mcp.py`](src/ruvsarpur_mcp.py) is a [Model Context Protocol](https://modelcontextprotocol.io) server that lets an AI agent (Claude Desktop, Claude Code, or any other MCP client) manage ruvsarpur for you. Through it the agent can search the catalog, make one-time downloads, follow shows with *monitors*, change download paths and settings, and read stats and download history.
+
+You can just ask in plain language, for example *"Follow Hvolpasveitin and save it to D:\Barnaefni"*, *"What new kids' shows started this week?"*, *"Download the movie Djúpið in 720p"* or *"How much did we download this month?"*.
+
+## Installing
+```
+pip install -r requirements.txt -r requirements-mcp.txt
+```
+Both the 1.x and 2.x versions of the `mcp` package work. ffmpeg must be available just as for normal use (see [Requirements](#requirements)), or point the server at it later with the `update_settings` tool (`ffmpeg_path`).
+
+## Connecting your agent
+**Claude Code**
+```
+claude mcp add ruvsarpur -- python /path/to/ruvsarpur/src/ruvsarpur_mcp.py
+```
+
+**Claude Desktop** (and most other clients): add this to your MCP configuration file (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "ruvsarpur": {
+      "command": "python",
+      "args": ["C:\\path\\to\\ruvsarpur\\src\\ruvsarpur_mcp.py"]
+    }
+  }
+}
+```
+
+**Over the network.** If ruvsarpur runs on another machine, such as a NAS or a media server, start it with an HTTP transport and connect your client to `http://<host>:8765/mcp`:
+```
+python ruvsarpur_mcp.py --transport streamable-http --host 0.0.0.0 --port 8765
+```
+> [!WARNING]
+> The HTTP transport has no authentication. Only expose it on a trusted network or put it behind a reverse proxy that handles authentication.
+
+Other options: `--config-dir` uses a different state directory, and `--no-scheduler` turns off automatic monitor runs.
+
+## Available tools
+| Area | Tools |
+| ----- | ----- |
+| Catalog | `search`, `browse_catalog`, `list_categories`, `get_series`, `get_episode`, `refresh_catalog` |
+| One-time downloads | `download` (by `pids`, `sids` or `query`, with `dry_run` to preview), `get_job`, `list_jobs`, `cancel_job` |
+| History | `get_download_history`, `mark_downloaded`, `unmark_downloaded` |
+| Monitors | `add_monitor`, `update_monitor`, `remove_monitor`, `list_monitors`, `check_monitors` (preview), `run_monitors` |
+| Settings & paths | `get_settings`, `update_settings`, `set_download_path` |
+| Stats | `get_stats`: catalog size and age, downloads in the last 24h, 7 days and 30 days, top series, free disk space, running jobs and whether ffmpeg was found |
+
+Downloads run as background jobs, one at a time, using `ruvsarpur.py` itself, so file naming, Plex layout, metadata, subtitles and the "already downloaded" registry behave exactly as on the command line. A download tool returns a `job_id` straight away, and the agent follows progress with `get_job`. A download by `query` that would fetch more than `max_query_matches` (default 25) new episodes is refused unless the agent confirms it with `allow_many`, so a vague search cannot fill your disk.
+
+## Monitors
+A monitor is a show the agent follows. Each time monitors run, every new episode that has not been downloaded yet is fetched.
+* `sids`: follows one exact series run (season), the same as `--sid`.
+* `query`: follows a title across new seasons and reruns, the same as `--find`. This is the approach recommended in [Scheduling downloads](#scheduling-downloads).
+
+Each monitor can set its own `output_path`, `quality`, `plex`, `original_title` and `include_english_subs`. Any option a monitor leaves empty follows the global settings. So when `set_download_path` changes the default folder, every monitor without its own path saves to the new folder from then on. Files that were already downloaded are never moved.
+
+## Running monitors on a schedule
+There are two ways to do this:
+1. **Inside the MCP server.** Ask the agent to set `monitor_interval_minutes` (for example 360 for every six hours). The server then runs all enabled monitors on that interval for as long as it is running.
+2. **From cron or Windows Task Scheduler.** This works without the agent:
+   ```
+   python ruvsarpur_mcp.py --run-monitors
+   ```
+   It refreshes the catalog, downloads new episodes for every enabled monitor, prints a summary and exits with code 1 if a monitor failed.
+
+The MCP server, `--run-monitors` and the job queue share a lock file, so they never download at the same time.
+
+## Where state is stored
+Everything goes in the normal ruvsarpur config directory (`~/.ruvsarpur`, or the `RUVSARPUR_CONFIG_DIR` environment variable), next to the existing catalog and download registry. The command line tool and the MCP server therefore share their state.
+
+| File | Contents |
+| ----- | ----- |
+| `mcp-settings.json` | Default download path, quality, Plex mode, ffmpeg path, monitor interval, ... |
+| `monitors.json` | Monitors and the result of their last run |
+| `download-history.json` | Every download made through the MCP server, with file path and size |
+| `mcp-jobs.json` | The 100 most recent finished jobs |
 
 # Frequently Asked Questions
 
